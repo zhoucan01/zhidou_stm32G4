@@ -1,0 +1,7 @@
+/build/
+__pycache__/
+*.pyc
+/MDK-ARM/zhongbaiSt/
+/MDK-ARM/*.lst
+/MDK-ARM/*.uvguix.*
+*.log

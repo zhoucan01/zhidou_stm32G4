@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "gcc-release",
+      "displayName": "STM32G431 Product Modbus GCC Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/gcc-release",
+      "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "build", "configurePreset": "gcc-release", "targets": ["F1_Product_Modbus_v2_M1", "F1_POWER_V004_Product_Modbus_v2_M1"] },
+    { "name": "product-modbus", "configurePreset": "gcc-release", "targets": ["F1_Product_Modbus_v2_M1"] },
+    { "name": "power-product-modbus", "configurePreset": "gcc-release", "targets": ["F1_POWER_V004_Product_Modbus_v2_M1"] },
+    { "name": "flash-product-modbus", "configurePreset": "gcc-release", "targets": ["flash-product-modbus"] },
+    { "name": "flash-power-product-modbus", "configurePreset": "gcc-release", "targets": ["flash-power-product-modbus"] }
+  ]
+}
