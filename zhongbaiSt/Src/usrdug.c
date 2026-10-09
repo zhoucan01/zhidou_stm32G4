@@ -1,6 +1,7 @@
 #include "usrdug.h"
 #include "product_modbus.h"
 #include "usart.h"
+#include "mc_api.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,6 +140,13 @@ void UsrDug_HandleLine(char *line)
   }
   else
   {
+    if(strcmp(key, "motor") == 0 && strcmp(val, "?") == 0)
+    {
+      snprintf(reply, sizeof(reply), "NB+motor,state=%u,fault=0x%04X,history=0x%04X,rpm=%ld\r\n",
+        (unsigned)MC_GetSTMStateMotor1(), (unsigned)MC_GetCurrentFaultsMotor1(),
+        (unsigned)MC_GetOccurredFaultsMotor1(), (long)MC_GetMecSpeedAverageMotor1() * 6L);
+      ok = 1U; goto done;
+    }
     if((strcmp(key, "heat1") == 0 || strcmp(key, "heat2") == 0) && strcmp(val, "?") == 0)
     {
       uint32_t mask = __get_PRIMASK();
@@ -166,7 +174,15 @@ void UsrDug_HandleLine(char *line)
     if(strcmp(key, "motor") == 0)
     {
       error = "motor-range-or-state";
-      if(a < -20000 || a > 20000 || !ProductModbus_DebugMotor((int16_t)a)) goto done;
+      if(a < -20000 || a > 20000 || (a != 0 && a > -1000 && a < 1000))
+      { error = "motor-range"; goto done; }
+      if(!ProductModbus_DebugMotor((int16_t)a))
+      {
+        snprintf(reply, sizeof(reply), "NB+ERR,motor-rejected,state=%u,fault=0x%04X,history=0x%04X\r\n",
+          (unsigned)MC_GetSTMStateMotor1(), (unsigned)MC_GetCurrentFaultsMotor1(),
+          (unsigned)MC_GetOccurredFaultsMotor1());
+        ok = 1U; goto done;
+      }
     }
     else if(strcmp(key, "heat1") == 0 || strcmp(key, "heat2") == 0)
     {
