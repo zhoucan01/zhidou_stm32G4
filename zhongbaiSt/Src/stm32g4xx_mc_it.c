@@ -37,6 +37,7 @@
 
 /* USER CODE BEGIN Includes */
 #include "main.h"
+#include "usrdug.h"
 #include "tim.h"
 #include "stdio.h"
 extern int ConType;
@@ -44,11 +45,16 @@ extern int Level;
 extern uint8_t RecData;
 extern int TotalSwitch;
 
-
-//低电平触发，功率从50-550
-int HeatPowerTable[25][2]={{6499,169},{5499,169},{3999,169},{3499,169},
-                       {2999,169},{1999,169},{7499,169},{5999,169},
-                       {5499,169},{4499,169},{3499,169},{2499,169},{499,169}};
+//50-1300w
+int HeatPowerTable[30][2]={
+                           {6890,169},{6280,169},{5700,169},{5300,169},{4950,169},
+                           {4550,169},{4180,169},{3800,169},{3400,169},{3000,169},
+                           {2550,169},{2000,169},{1300,169},//50-650w
+                           {9000,169},{8000,169},
+                           {7450,169},{7000,169},{6600,169},{6200,169},{5800,169},
+                           {5400,169},{5050,169},{4650,169},{4250,169},{3800,169},
+                           {3200,169},{3200,169},{3200,169},{3200,169},{3200,169},//700-1300w
+                          };
 
 
 //两个加热，低电平触发，功率从50-650
@@ -208,7 +214,19 @@ void TIMx_BRK_M1_IRQHandler(void)
   */
 void USART_IRQHandler(void)
 {
-#if defined(F1_CN2_ASCII)
+#if defined(USRDUG_UI_UART)
+  if(LL_USART_IsActiveFlag_ORE(USART1) || LL_USART_IsActiveFlag_FE(USART1) ||
+     LL_USART_IsActiveFlag_NE(USART1))
+  {
+    LL_USART_ClearFlag_ORE(USART1);
+    LL_USART_ClearFlag_FE(USART1);
+    LL_USART_ClearFlag_NE(USART1);
+    /* Force the current command to be discarded through the next newline. */
+    UsrDug_RxByteISR(0U);
+  }
+  if(LL_USART_IsActiveFlag_RXNE(USART1))
+    UsrDug_RxByteISR(LL_USART_ReceiveData8(USART1));
+#elif defined(F1_CN2_ASCII)
   HAL_UART_IRQHandler(&huart1);
 #else
   /* USER CODE BEGIN USART_IRQn 0 */
@@ -270,7 +288,7 @@ void HardFault_Handler(void)
   /* Go to infinite loop when Hard Fault exception occurs */
   while (1)
   {
-#if !defined(F1_CN2_ASCII)
+#if !defined(F1_CN2_ASCII) && !defined(USRDUG_UI_UART)
     {
       if (LL_USART_IsActiveFlag_ORE(pUSART.USARTx)) /* Overrun error occurs */
       {

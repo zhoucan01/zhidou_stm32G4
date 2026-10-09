@@ -11,7 +11,7 @@ set(APP_SOURCES
   Src/motor_control_protocol.c Src/motorcontrol.c Src/regular_conversion_manager.c
   Src/stm32g4xx_hal_msp.c Src/stm32g4xx_it.c
   Src/stm32g4xx_mc_it.c Src/system_stm32g4xx.c Src/tim.c Src/ui_task.c Src/usart.c
-  Src/user_interface.c
+  Src/user_interface.c Src/usrdug.c
 )
 
 set(HAL_SOURCES
@@ -78,7 +78,7 @@ function(add_product_target target)
   )
   target_include_directories(${target} PRIVATE ${PRODUCT_INCLUDES})
   target_compile_definitions(${target} PRIVATE
-    ARM_MATH_CM4 USE_HAL_DRIVER STM32G431xx F1_PRODUCT_MODBUS F1_PRODUCT_MODBUS_M1 ${ARGN})
+    ARM_MATH_CM4 USE_HAL_DRIVER STM32G431xx F1_PRODUCT_MODBUS F1_PRODUCT_MODBUS_M1 USRDUG_UI_UART ${ARGN})
   target_compile_options(${target} PRIVATE
     ${CPU_FLAGS} -O2 -g3 -ffunction-sections -fdata-sections -funsigned-char -Wall)
   target_link_options(${target} PRIVATE

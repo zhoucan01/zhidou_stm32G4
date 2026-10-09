@@ -34,6 +34,8 @@ extern volatile uint32_t modbusFrameErrorCount;
 
 void ProductModbus_Init(void);
 void ProductModbus_Task(void);
+uint8_t ProductModbus_DebugMotor(int16_t rpm);
+uint8_t ProductModbus_DebugHeat(uint8_t channel, uint16_t level);
 void ProductModbus_RxByteISR(uint8_t value);
 void ProductModbus_RxBytesISR(const uint8_t *data, uint16_t length);
 void ProductModbus_ReportVersion(void);

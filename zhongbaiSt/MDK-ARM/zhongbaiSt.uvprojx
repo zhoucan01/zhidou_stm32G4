@@ -338,7 +338,7 @@
             <v6Rtti>0</v6Rtti>
             <VariousControls>
               <MiscControls></MiscControls>
-              <Define>ARM_MATH_CM4,USE_HAL_DRIVER,STM32G431xx</Define>
+              <Define>ARM_MATH_CM4,USE_HAL_DRIVER,STM32G431xx,F1_PRODUCT_MODBUS,F1_PRODUCT_MODBUS_M1,USRDUG_UI_UART</Define>
               <Undefine></Undefine>
               <IncludePath>../Inc;                                                                                                                       ../Drivers/STM32G4xx_HAL_Driver/Inc;                                                                                                                       ../Drivers/STM32G4xx_HAL_Driver/Inc/Legacy;                                                                                                                       ../MCSDK_v5.4.8-Full/MotorControl/MCSDK/MCLib/Any/Inc;                                                                                                                       ../MCSDK_v5.4.8-Full/MotorControl/MCSDK/MCLib/G4xx/Inc;                                                                                                                       ../MCSDK_v5.4.8-Full/MotorControl/MCSDK/UILibrary/Inc;                                                                                                                       ../MCSDK_v5.4.8-Full/MotorControl/MCSDK/SystemDriveParams;                                                                                                                       ../Drivers/CMSIS/Device/ST/STM32G4xx/Include;                                                                                                                       ../Drivers/CMSIS/Include;                                                                                                                       ../Drivers/CMSIS/DSP/Include</IncludePath>
             </VariousControls>
@@ -398,6 +398,21 @@
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Src/main.c</FilePath>
+            </File>
+            <File>
+              <FileName>commissioning.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Src/commissioning.c</FilePath>
+            </File>
+            <File>
+              <FileName>product_modbus.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Src/product_modbus.c</FilePath>
+            </File>
+            <File>
+              <FileName>usrdug.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Src/usrdug.c</FilePath>
             </File>
             <File>
               <FileName>gpio.c</FileName>

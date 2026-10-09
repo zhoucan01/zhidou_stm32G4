@@ -67,6 +67,7 @@ int TIM2HeatLevel=0;
 int TIM3HeatLevel=0;
 int TotolSwitch=0;
 int HeatBarSwitch=0;
+volatile uint32_t HeatZeroCount, HeatTimerStartCount, HeatTimerExpireCount;
 /* PB14 is not connected in the F1_POWER_V004 Altium design. This legacy
  * software channel must remain disabled unless a physical board revision and
  * continuity test prove a second heater path. See docs/HARDWARE_FACTS.md. */
@@ -74,7 +75,7 @@ int HeatRollSwitch=0;
 
 int MotorDir=0;//�������λ
 
-extern int HeatPowerTable[16][2];
+extern int HeatPowerTable[30][2];
 
 extern int LowPowerTable[13][2];
 extern int HighPowerTable[13][2];
@@ -116,6 +117,8 @@ extern UART_HandleTypeDef huart3;
   */
 void TIM2_IRQHandler(void)
 {
+  if((TIM2->SR & TIM_SR_UIF) != 0U && (TIM2->DIER & TIM_DIER_UIE) != 0U)
+    HeatTimerExpireCount++;
   /* USER CODE BEGIN TIM2_IRQn 0 */
 
   /* USER CODE END TIM2_IRQn 0 */
@@ -226,10 +229,24 @@ void EXTI15_10_IRQHandler(void)
 	if(LL_EXTI_ReadFlag_0_31(LL_EXTI_LINE_12))
   {
     LL_EXTI_ClearFlag_0_31 (LL_EXTI_LINE_12);
-    HAL_GPIO_WritePin(HeatRoll_GPIO_Port,HeatRoll_Pin,GPIO_PIN_RESET);
-		HAL_GPIO_WritePin(HeatBar_GPIO_Port, HeatBar_Pin, GPIO_PIN_RESET);
-		HAL_TIM_Base_Stop(&htim2);
-		HAL_TIM_Base_Stop(&htim3);
+    HeatZeroCount++;
+    /* Level 30 bypasses phase delay and stays high across zero crossings. */
+#if !defined(F1_PRODUCT_MODBUS) || defined(F1_TEST_BOARD)
+    HAL_GPIO_WritePin(HeatRoll_GPIO_Port, HeatRoll_Pin,
+      TotolSwitch != 0 && HeatRollSwitch != 0 && TIM3HeatLevel == 30
+      ? GPIO_PIN_SET : GPIO_PIN_RESET);
+#else
+    HAL_GPIO_WritePin(HeatRoll_GPIO_Port, HeatRoll_Pin, GPIO_PIN_RESET);
+#endif
+    HAL_GPIO_WritePin(HeatBar_GPIO_Port, HeatBar_Pin,
+      TotolSwitch != 0 && HeatBarSwitch != 0 && TIM2HeatLevel == 30
+      ? GPIO_PIN_SET : GPIO_PIN_RESET);
+		HAL_TIM_Base_Stop_IT(&htim2);
+		HAL_TIM_Base_Stop_IT(&htim3);
+		__HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+		__HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE);
+		HAL_NVIC_ClearPendingIRQ(TIM2_IRQn);
+		HAL_NVIC_ClearPendingIRQ(TIM3_IRQn);
 		TIM2->CNT = 0;
 		TIM3->CNT = 0;
 
@@ -239,7 +256,7 @@ void EXTI15_10_IRQHandler(void)
 		 * delay whenever the corresponding product command is active. */
 #if defined(F1_PRODUCT_MODBUS)
 		if((TotolSwitch != 0) && (HeatBarSwitch != 0) &&
-		   (TIM2HeatLevel >= 1) && (TIM2HeatLevel <= 13))
+		   (TIM2HeatLevel >= 1) && (TIM2HeatLevel <= 30))
 		{
 			TIM2->ARR=HeatPowerTable[TIM2HeatLevel-1][0];
 			TIM2->PSC=HeatPowerTable[TIM2HeatLevel-1][1];
@@ -248,7 +265,7 @@ void EXTI15_10_IRQHandler(void)
 		//�������
 		if((ConType==2)&&(TIM2HeatLevel!=0))
 		{
-			if((TIM2HeatLevel>=1)&&(TIM2HeatLevel<=13))
+			if((TIM2HeatLevel>=1)&&(TIM2HeatLevel<=30))
 			{
 				TIM2->ARR=HeatPowerTable[TIM2HeatLevel-1][0];
 				TIM2->PSC=HeatPowerTable[TIM2HeatLevel-1][1];
@@ -258,7 +275,7 @@ void EXTI15_10_IRQHandler(void)
 		
 #if defined(F1_PRODUCT_MODBUS) && defined(F1_TEST_BOARD)
 		if((TotolSwitch != 0) && (HeatRollSwitch != 0) &&
-		   (TIM3HeatLevel >= 1) && (TIM3HeatLevel <= 13))
+		   (TIM3HeatLevel >= 1) && (TIM3HeatLevel <= 30))
 		{
 			TIM3->ARR=HeatPowerTable[TIM3HeatLevel-1][0];
 			TIM3->PSC=HeatPowerTable[TIM3HeatLevel-1][1];
@@ -267,7 +284,7 @@ void EXTI15_10_IRQHandler(void)
 		//�������
 		if((ConType==4)&&(TIM3HeatLevel!=0))
 		{
-			if((TIM3HeatLevel>=1)&&(TIM3HeatLevel<=13))
+			if((TIM3HeatLevel>=1)&&(TIM3HeatLevel<=30))
 			{
 				TIM3->ARR=HeatPowerTable[TIM3HeatLevel-1][0];
 				TIM3->PSC=HeatPowerTable[TIM3HeatLevel-1][1];
@@ -278,26 +295,34 @@ void EXTI15_10_IRQHandler(void)
 		
 
 		
+    /* PSC is buffered. Load it with UG while interrupts are disabled, then
+     * clear UG's update flag before arming the actual delay. */
+    TIM2->EGR = TIM_EGR_UG;
+    TIM3->EGR = TIM_EGR_UG;
+    __HAL_TIM_CLEAR_FLAG(&htim2, TIM_FLAG_UPDATE);
+    __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_UPDATE);
+    TIM2->CNT = 0U;
+    TIM3->CNT = 0U;
 		if((TotolSwitch != 0) && (HeatBarSwitch != 0) &&
-		   (TIM2HeatLevel>=1)&&(TIM2HeatLevel<=6)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==0))
+		   (TIM2HeatLevel>=1)&&(TIM2HeatLevel<=13)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==0))
 		{
-			HAL_TIM_Base_Start_IT(&htim2);
+			if(HAL_TIM_Base_Start_IT(&htim2) == HAL_OK) HeatTimerStartCount++;
 		}
 		if((TotolSwitch != 0) && (HeatBarSwitch != 0) &&
-		   (TIM2HeatLevel>=7)&&(TIM2HeatLevel<=13)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==1))
+		   (TIM2HeatLevel>=14)&&(TIM2HeatLevel<=29)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==1))
 		{
-			HAL_TIM_Base_Start_IT(&htim2);
+			if(HAL_TIM_Base_Start_IT(&htim2) == HAL_OK) HeatTimerStartCount++;
 		}
 		
 		
 #if !defined(F1_PRODUCT_MODBUS) || defined(F1_TEST_BOARD)
 		if((TotolSwitch != 0) && (HeatRollSwitch != 0) &&
-		   (TIM3HeatLevel>=1)&&(TIM3HeatLevel<=6)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==0))
+		   (TIM3HeatLevel>=1)&&(TIM3HeatLevel<=13)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==0))
 		{
 			HAL_TIM_Base_Start_IT(&htim3);
 		}
 		if((TotolSwitch != 0) && (HeatRollSwitch != 0) &&
-		   (TIM3HeatLevel>=7)&&(TIM3HeatLevel<=13)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==1))
+		   (TIM3HeatLevel>=14)&&(TIM3HeatLevel<=29)&&(HAL_GPIO_ReadPin(Zero_GPIO_Port,Zero_Pin)==1))
 		{
 			HAL_TIM_Base_Start_IT(&htim3);
 		}

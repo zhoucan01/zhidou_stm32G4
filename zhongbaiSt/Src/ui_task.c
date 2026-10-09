@@ -37,7 +37,7 @@ static volatile uint16_t  bCOMATRTimeCounter = SERIALCOM_ATR_TIME_TICKS;
 void UI_TaskInit( uint32_t* pUICfg, uint8_t bMCNum, MCI_Handle_t* pMCIList[],
                   MCT_Handle_t* pMCTList[],const char* s_fwVer )
 {
-#if defined(F1_CN2_ASCII)
+#if defined(F1_CN2_ASCII) || defined(USRDUG_UI_UART)
     (void)pUICfg;
     (void)bMCNum;
     (void)pMCIList;

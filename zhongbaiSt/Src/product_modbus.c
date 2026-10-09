@@ -1,4 +1,5 @@
 #include "product_modbus.h"
+#include "usrdug.h"
 #include "commissioning.h"
 #include "mc_config.h"
 #include "mc_api.h"
@@ -115,6 +116,13 @@ static void writeHolding(uint16_t address, uint16_t value)
         MotorLevel = 0;
         HeatBarSwitch = 0;
         HeatRollSwitch = 0;
+        TIM2->CR1 &= ~TIM_CR1_CEN;
+        TIM3->CR1 &= ~TIM_CR1_CEN;
+        TIM2->DIER &= ~TIM_DIER_UIE;
+        TIM3->DIER &= ~TIM_DIER_UIE;
+        TIM2->SR &= ~TIM_SR_UIF;
+        TIM3->SR &= ~TIM_SR_UIF;
+        HAL_GPIO_WritePin(GPIOB, HeatBar_Pin | HeatRoll_Pin, GPIO_PIN_RESET);
         if(appliedMotorLevel != 0 || directMotionActive != 0U)
           Commissioning_RemoteStop();
         appliedMotorLevel = 0;
@@ -125,12 +133,28 @@ static void writeHolding(uint16_t address, uint16_t value)
       holdingRegs[address] = TotolSwitch != 0 ? value : 0U;
       TIM2HeatLevel = (int)holdingRegs[address];
       HeatBarSwitch = TotolSwitch != 0 && TIM2HeatLevel != 0;
+      if(TIM2HeatLevel == 30 || TIM2HeatLevel == 0)
+      {
+        TIM2->CR1 &= ~TIM_CR1_CEN;
+        TIM2->DIER &= ~TIM_DIER_UIE;
+        TIM2->SR &= ~TIM_SR_UIF;
+        HAL_GPIO_WritePin(HeatBar_GPIO_Port, HeatBar_Pin,
+                         TIM2HeatLevel == 30 ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      }
       break;
     case MB_HREG_HEAT_ROLL_LEVEL:
 #if defined(F1_TEST_BOARD)
       holdingRegs[address] = TotolSwitch != 0 ? value : 0U;
       TIM3HeatLevel = (int)holdingRegs[address];
       HeatRollSwitch = TotolSwitch != 0 && TIM3HeatLevel != 0;
+      if(TIM3HeatLevel == 30 || TIM3HeatLevel == 0)
+      {
+        TIM3->CR1 &= ~TIM_CR1_CEN;
+        TIM3->DIER &= ~TIM_DIER_UIE;
+        TIM3->SR &= ~TIM_SR_UIF;
+        HAL_GPIO_WritePin(HeatRoll_GPIO_Port, HeatRoll_Pin,
+                         TIM3HeatLevel == 30 ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      }
 #else
       /* F1_POWER_V004 has no electrical connection from PB14 to a heater.
        * Keep the G4 register writable, but report and command this unavailable
@@ -138,6 +162,10 @@ static void writeHolding(uint16_t address, uint16_t value)
       holdingRegs[address] = 0U;
       TIM3HeatLevel = 0;
       HeatRollSwitch = 0;
+      TIM3->CR1 &= ~TIM_CR1_CEN;
+      TIM3->DIER &= ~TIM_DIER_UIE;
+      TIM3->SR &= ~TIM_SR_UIF;
+      HAL_GPIO_WritePin(HeatRoll_GPIO_Port, HeatRoll_Pin, GPIO_PIN_RESET);
 #endif
       break;
     case MB_HREG_MOTOR_LEVEL:
@@ -192,7 +220,7 @@ static uint8_t validHoldingValue(uint16_t address, uint16_t value)
       return value <= 1U;
     case MB_HREG_HEAT_BAR_LEVEL:
     case MB_HREG_HEAT_ROLL_LEVEL:
-      return value <= 13U;
+      return value <= 30U;
     case MB_HREG_MOTOR_LEVEL:
       return (int16_t)value >= -15 && (int16_t)value <= 15;
     case MB_HREG_ENGINEERING_COMMAND:
@@ -385,6 +413,47 @@ static uint8_t runMotion(int16_t rpm, uint16_t rampMs, uint16_t acc,
   c.idKp = 3321; c.idKi = 122; c.iqKp = 3321; c.iqKi = 122;
   c.speedKp = 200; c.speedKi = 25;
   return Commissioning_RemoteRun(&c) ? 1U : 0U;
+}
+
+uint8_t ProductModbus_DebugMotor(int16_t rpm)
+{
+  if(rpm == 0)
+  {
+    Commissioning_RemoteStop();
+    MotorLevel = 0; holdingRegs[MB_HREG_MOTOR_LEVEL] = 0U;
+    appliedMotorLevel = 0; directMotionActive = 0U;
+    return 1U;
+  }
+  if(rpm < -20000 || rpm > 20000) return 0U;
+  if(!runMotion(rpm, PRODUCT_LEVEL_RAMP_MS, PRODUCT_LEVEL_ACC_RPM_S,
+                PRODUCT_LEVEL_DEC_RPM_S, 0U, 1U)) return 0U;
+  writeHolding(MB_HREG_TOTAL_SWITCH, 1U);
+  MotorLevel = 0; holdingRegs[MB_HREG_MOTOR_LEVEL] = 0U;
+  appliedMotorLevel = 0; directMotionActive = 1U;
+  return 1U;
+}
+
+uint8_t ProductModbus_DebugHeat(uint8_t channel, uint16_t level)
+{
+  if(level > 30U || channel < 1U || channel > 2U) return 0U;
+#if !defined(F1_TEST_BOARD)
+  if(channel == 2U && level != 0U) return 0U;
+#endif
+  if(level != 0U) writeHolding(MB_HREG_TOTAL_SWITCH, 1U);
+  writeHolding(channel == 1U ? MB_HREG_HEAT_BAR_LEVEL : MB_HREG_HEAT_ROLL_LEVEL, level);
+  /* Off takes effect immediately, without waiting for another zero crossing. */
+  if(level == 0U)
+  {
+    uint32_t mask = __get_PRIMASK(); __disable_irq();
+    TIM_TypeDef *timer = channel == 1U ? TIM2 : TIM3;
+    timer->CR1 &= ~TIM_CR1_CEN;
+    timer->DIER &= ~TIM_DIER_UIE;
+    timer->SR &= ~TIM_SR_UIF;
+    timer->CNT = 0U;
+    HAL_GPIO_WritePin(GPIOB, channel == 1U ? HeatBar_Pin : HeatRoll_Pin, GPIO_PIN_RESET);
+    if(mask == 0U) __enable_irq();
+  }
+  return 1U;
 }
 
 static uint8_t startExtendedMotion(void)
@@ -628,6 +697,33 @@ void ProductModbus_Task(void)
   while(1)
   {
     available = modbusRxLength;
+    /* ASCII is recognized only at the stream head; binary payloads are never
+     * scanned for NB prefixes. Preserve split lines until CR/LF arrives. */
+#if !defined(USRDUG_UI_UART)
+    if(available != 0U && (modbusRxWindow[0] == 'n' || modbusRxWindow[0] == 'N'))
+    {
+      static uint32_t asciiWaitSince;
+      static uint8_t asciiWaiting;
+      char line[96];
+      uint16_t i;
+      for(i = 0U; i < available && i < sizeof(line) - 1U; i++)
+        if(modbusRxWindow[i] == '\r' || modbusRxWindow[i] == '\n') break;
+      if(i < available && i < sizeof(line) - 1U)
+      {
+        memcpy(line, modbusRxWindow, i); line[i] = '\0';
+        consumeRxBytes((uint16_t)(i + 1U)); asciiWaiting = 0U;
+        UsrDug_HandleLine(line); continue;
+      }
+      if(!asciiWaiting) { asciiWaiting = 1U; asciiWaitSince = HAL_GetTick(); }
+      if(i == sizeof(line) - 1U || HAL_GetTick() - asciiWaitSince > 1000U)
+      {
+        consumeRxBytes(i); asciiWaiting = 0U; modbusFrameErrorCount++; continue;
+      }
+      return;
+    }
+    if(available != 0U && (modbusRxWindow[0] == '\r' || modbusRxWindow[0] == '\n'))
+    { consumeRxBytes(1U); continue; }
+#endif
     if(available < 2U) return;
     address = modbusRxWindow[0];
     if((address != MODBUS_SLAVE_ADDRESS && address != 0U) || !supportedFunction(modbusRxWindow[1]))

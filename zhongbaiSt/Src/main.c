@@ -36,6 +36,7 @@
 #include "commissioning.h"
 #if defined(F1_PRODUCT_MODBUS)
 #include "product_modbus.h"
+#include "usrdug.h"
 #endif
 #if defined(F1_CN2_ASCII)
 #include "cn2_ascii.h"
@@ -176,6 +177,7 @@ int main(void)
 	HAL_TIM_Base_Start_IT(&htim6);
 #if defined(F1_PRODUCT_MODBUS)
   ProductModbus_Init();
+  UsrDug_Init();
 #elif defined(F1_CN2_ASCII)
   Cn2Ascii_Init();
 #else
@@ -192,6 +194,7 @@ int main(void)
   {
 #if defined(F1_PRODUCT_MODBUS)
     ProductModbus_Task();
+    UsrDug_Task();
 #elif defined(F1_CN2_ASCII)
     Cn2Ascii_Task();
 #else
