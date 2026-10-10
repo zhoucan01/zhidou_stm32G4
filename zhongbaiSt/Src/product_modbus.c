@@ -26,15 +26,29 @@
 #define MB_EX_ILLEGAL_ADDRESS 2U
 #define MB_EX_ILLEGAL_VALUE 3U
 
-uint8_t modbusRxWindow[MODBUS_RX_WINDOW_SIZE];
-volatile uint16_t modbusRxLength;
+/* A Modbus RTU frame arrives back-to-back within a few ms at the configured
+ * 1 Mbaud rate (256 bytes ~= 2.6 ms). The RX DMA is re-armed on every IDLE,
+ * so each completed burst is handed to the parser as a stable slot copy. */
+#define MB_RX_QUEUE_DEPTH    4U
+#define MB_RESPONSE_BUFFER_SIZE 256U
+
+typedef struct
+{
+  uint16_t length;
+  uint8_t  data[MODBUS_RX_BUFFER_SIZE];
+} modbus_rx_slot_t;
+
+static modbus_rx_slot_t rxQueue[MB_RX_QUEUE_DEPTH];
+static volatile uint8_t rxHead;
+static volatile uint8_t rxTail;
+
 volatile uint32_t modbusRxOverflowCount;
 volatile uint32_t modbusCrcErrorCount;
 volatile uint32_t modbusFrameErrorCount;
 
 static uint8_t coils[MB_COIL_COUNT];
 static uint16_t holdingRegs[MB_HOLD_REG_COUNT];
-static uint8_t response[256];
+static uint8_t response[MB_RESPONSE_BUFFER_SIZE];
 
 #define PRODUCT_LEVEL_RAMP_MS 500U
 #define PRODUCT_LEVEL_ACC_RPM_S 32000U
@@ -388,19 +402,107 @@ static uint8_t supportedFunction(uint8_t fn)
 static uint16_t requestLength(const uint8_t *data, uint16_t available)
 {
   if(available < 2U) return 0U;
-  if(data[1] >= 1U && data[1] <= 6U) return 8U;
-  if(data[1] == 15U || data[1] == 16U) return available >= 7U ? (uint16_t)(9U + data[6]) : 0U;
-  return 0U;
+  switch(data[1])
+  {
+    case 0x01U: case 0x02U: case 0x03U: case 0x04U: case 0x05U: case 0x06U:
+      return 8U;
+    case 0x0FU: case 0x10U:
+      return available >= 7U ? (uint16_t)(9U + data[6]) : 0U;
+    /* Unknown functions are fixed 8-byte requests. After CRC validation the
+     * request reaches processRequest(), which returns exception 0x01. */
+    default:
+      return 8U;
+  }
 }
 
-static void consumeRxBytes(uint16_t count)
+/* AT32-style byte-wise parser: every error path advances offset by exactly one
+ * byte, never by an estimated frame length and never breaks out of the loop.
+ * A corrupt frame can at most swallow its own bytes; the next valid frame in
+ * the same burst remains aligned and parsed. Runs in task context on a stable
+ * slot copy, so the ISR may enqueue the next burst concurrently. */
+static void processBurst(const uint8_t *data, uint16_t length)
 {
-  uint32_t primask = __get_PRIMASK();
-  __disable_irq();
-  if(count > modbusRxLength) count = modbusRxLength;
-  modbusRxLength = (uint16_t)(modbusRxLength - count);
-  if(modbusRxLength != 0U) memmove(modbusRxWindow, &modbusRxWindow[count], modbusRxLength);
-  if(primask == 0U) __enable_irq();
+  uint16_t offset = 0U;
+
+  while(offset < length)
+  {
+    uint16_t available = (uint16_t)(length - offset);
+    uint16_t frameLength;
+    uint16_t crc;
+    uint16_t replyLength;
+    uint8_t address = data[offset];
+
+    if(address != MODBUS_SLAVE_ADDRESS && address != 0U)
+    {
+      offset++;
+      continue;
+    }
+
+    if(available < 2U)
+    {
+      modbusFrameErrorCount++;
+      break;
+    }
+
+    if(supportedFunction(data[offset + 1U]) == 0U)
+    {
+      modbusFrameErrorCount++;
+      offset++;
+      continue;
+    }
+
+    frameLength = requestLength(&data[offset], available);
+    if(frameLength == 0U || frameLength > available)
+    {
+      modbusFrameErrorCount++;
+      offset++;
+      continue;
+    }
+
+    crc = (uint16_t)(data[offset + frameLength - 2U] |
+                     ((uint16_t)data[offset + frameLength - 1U] << 8));
+    if(crc != ProductModbus_CRC16(&data[offset], (uint16_t)(frameLength - 2U)))
+    {
+      modbusCrcErrorCount++;
+      offset++;
+      continue;
+    }
+
+    replyLength = processRequest(&data[offset], frameLength, address == 0U);
+    if(replyLength != 0U)
+    {
+      crc = ProductModbus_CRC16(response, replyLength);
+      response[replyLength++] = (uint8_t)crc;
+      response[replyLength++] = (uint8_t)(crc >> 8);
+      (void)RS485_Transmit(response, replyLength, 100U);
+    }
+    offset = (uint16_t)(offset + frameLength);
+  }
+}
+
+/* Called from the USART2 IDLE/DMA-complete handler with one completed burst.
+ * The ISR copies bytes into the next free slot and lets the task parse later;
+ * no frame assembly runs in interrupt context. */
+void ProductModbus_RxIdleCallback(const uint8_t *data, uint16_t length)
+{
+  uint8_t next;
+
+  if(data == NULL || length == 0U || length > MODBUS_RX_BUFFER_SIZE)
+  {
+    modbusFrameErrorCount++;
+    return;
+  }
+
+  next = (uint8_t)((rxHead + 1U) % MB_RX_QUEUE_DEPTH);
+  if(next == rxTail)
+  {
+    modbusRxOverflowCount++;
+    return;
+  }
+
+  memcpy(rxQueue[rxHead].data, data, length);
+  rxQueue[rxHead].length = length;
+  rxHead = next;
 }
 
 static uint8_t runMotion(int16_t rpm, uint16_t rampMs, uint16_t acc,
@@ -575,7 +677,7 @@ void ProductModbus_Init(void)
   HAL_GPIO_Init(DE_RE_GPIO_Port, &GPIO_InitStruct);
   RS485_RX_ENABLE();
 
-  modbusRxLength = 0U;
+  rxHead = 0U; rxTail = 0U;
   holdingRegs[MB_EXT_ID_KP] = 3321U; holdingRegs[MB_EXT_ID_KI] = 122U;
   holdingRegs[MB_EXT_IQ_KP] = 3321U; holdingRegs[MB_EXT_IQ_KI] = 122U;
   holdingRegs[MB_EXT_SPEED_KP] = 200U; holdingRegs[MB_EXT_SPEED_KI] = 25U;
@@ -625,24 +727,14 @@ void ProductModbus_ReportVersion(void)
   (void)RS485_Transmit(versionFrame, sizeof(versionFrame), 100U);
 }
 
-void ProductModbus_RxByteISR(uint8_t value)
-{
-  if(modbusRxLength < MODBUS_RX_WINDOW_SIZE) modbusRxWindow[modbusRxLength++] = value;
-  else modbusRxOverflowCount++;
-}
-
-void ProductModbus_RxBytesISR(const uint8_t *data, uint16_t length)
-{
-  uint16_t i;
-  for(i = 0U; i < length; i++) ProductModbus_RxByteISR(data[i]);
-}
-
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
 #if !defined(F1_PRODUCT_MODBUS)
   if(huart->Instance == USART2)
   {
-    ProductModbus_RxByteISR(RecData);
+    __disable_irq();
+    ProductModbus_RxIdleCallback(&RecData, 1U);
+    __enable_irq();
     (void)HAL_UART_Receive_IT(&huart2, &RecData, 1U);
   }
 #else
@@ -667,9 +759,6 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 void ProductModbus_Task(void)
 {
-  uint16_t available, frameLength, crc, replyLength;
-  uint8_t address;
-
   Commissioning_Task();
   productMotionTask();
   holdingRegs[17] = (uint16_t)MC_GetSTMStateMotor1();
@@ -692,71 +781,41 @@ void ProductModbus_Task(void)
   holdingRegs[58]=(uint16_t)Commissioning_VoltageLimitTicks;
   holdingRegs[59]=(uint16_t)(Commissioning_VoltageLimitTicks >> 16);
   updatePrivateSnapshot();
-  if(modbusRxLength == 0U) return;
+    while(rxHead != rxTail)
+    {
+      modbus_rx_slot_t slot;
+      uint8_t tail = rxTail;
+      slot.length = rxQueue[tail].length;
+      memcpy(slot.data, rxQueue[tail].data, slot.length);
+      rxTail = (uint8_t)((tail + 1U) % MB_RX_QUEUE_DEPTH);
 
-  while(1)
-  {
-    available = modbusRxLength;
-    /* ASCII is recognized only at the stream head; binary payloads are never
-     * scanned for NB prefixes. Preserve split lines until CR/LF arrives. */
-#if !defined(USRDUG_UI_UART)
-    if(available != 0U && (modbusRxWindow[0] == 'n' || modbusRxWindow[0] == 'N'))
-    {
-      static uint32_t asciiWaitSince;
-      static uint8_t asciiWaiting;
-      char line[96];
-      uint16_t i;
-      for(i = 0U; i < available && i < sizeof(line) - 1U; i++)
-        if(modbusRxWindow[i] == '\r' || modbusRxWindow[i] == '\n') break;
-      if(i < available && i < sizeof(line) - 1U)
+  #if !defined(USRDUG_UI_UART)
+      if(slot.length != 0U && (slot.data[0] == 'n' || slot.data[0] == 'N'))
       {
-        memcpy(line, modbusRxWindow, i); line[i] = '\0';
-        consumeRxBytes((uint16_t)(i + 1U)); asciiWaiting = 0U;
-        UsrDug_HandleLine(line); continue;
+        static char line[96];
+              uint16_t i;
+              uint16_t lineLen = 0U;
+              for(i = 0U; i < slot.length; i++)
+        {
+          if(slot.data[i] == '\r' || slot.data[i] == '\n')
+          {
+            line[lineLen] = '\0';
+            UsrDug_HandleLine(line);
+            lineLen = 0U;
+          }
+          else if(lineLen < sizeof(line) - 1U)
+          {
+            line[lineLen++] = (char)slot.data[i];
+          }
+        }
+        continue;
       }
-      if(!asciiWaiting) { asciiWaiting = 1U; asciiWaitSince = HAL_GetTick(); }
-      if(i == sizeof(line) - 1U || HAL_GetTick() - asciiWaitSince > 1000U)
+      if(slot.length != 0U && (slot.data[0] == '\r' || slot.data[0] == '\n'))
       {
-        consumeRxBytes(i); asciiWaiting = 0U; modbusFrameErrorCount++; continue;
+        continue;
       }
-      return;
-    }
-    if(available != 0U && (modbusRxWindow[0] == '\r' || modbusRxWindow[0] == '\n'))
-    { consumeRxBytes(1U); continue; }
-#endif
-    if(available < 2U) return;
-    address = modbusRxWindow[0];
-    if((address != MODBUS_SLAVE_ADDRESS && address != 0U) || !supportedFunction(modbusRxWindow[1]))
-    {
-      modbusFrameErrorCount++; consumeRxBytes(1U); continue;
-    }
-    frameLength = requestLength(modbusRxWindow, available);
-    if(frameLength == 0U)
-    {
-      if((modbusRxWindow[1] == 15U || modbusRxWindow[1] == 16U) && available < 7U)
-        return;
-      modbusFrameErrorCount++; consumeRxBytes(1U); continue;
-    }
-    if(frameLength > MODBUS_RX_WINDOW_SIZE)
-    {
-      modbusFrameErrorCount++; consumeRxBytes(1U); continue;
-    }
-    if(available < frameLength)
-    {
-      return;
-    }
-    crc = (uint16_t)(modbusRxWindow[frameLength - 2U] | ((uint16_t)modbusRxWindow[frameLength - 1U] << 8));
-    if(crc != ProductModbus_CRC16(modbusRxWindow, (uint16_t)(frameLength - 2U)))
-    {
-      modbusCrcErrorCount++; consumeRxBytes(1U); continue;
-    }
-    replyLength = processRequest(modbusRxWindow, frameLength, address == 0U);
-    consumeRxBytes(frameLength);
-    if(replyLength != 0U)
-    {
-      crc = ProductModbus_CRC16(response, replyLength);
-      response[replyLength++] = (uint8_t)crc; response[replyLength++] = (uint8_t)(crc >> 8);
-      (void)RS485_Transmit(response, replyLength, 100U);
+  #endif
+
+      processBurst(slot.data, slot.length);
     }
   }
-}

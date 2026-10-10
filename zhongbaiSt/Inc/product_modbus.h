@@ -4,7 +4,7 @@
 #include "main.h"
 
 #define MODBUS_SLAVE_ADDRESS       3U
-#define MODBUS_RX_WINDOW_SIZE   2048U
+#define MODBUS_RX_BUFFER_SIZE    256U
 #define MODBUS_DMA_RX_SIZE        256U
 
 /* SOFTWARE_VERSION_* are supplied by the validated compiler via file. */
@@ -26,18 +26,18 @@
 #define MB_IREG_VERSION_HIGH      11U
 #define MB_IREG_VERSION_LOW       12U
 
-extern uint8_t modbusRxWindow[MODBUS_RX_WINDOW_SIZE];
-extern volatile uint16_t modbusRxLength;
 extern volatile uint32_t modbusRxOverflowCount;
 extern volatile uint32_t modbusCrcErrorCount;
 extern volatile uint32_t modbusFrameErrorCount;
+
+/* AT32-style RX hand-off: the ISR copies each completed IDLE-delimited burst
+ * into a bounded slot; the task parses the slot copy byte-wise. */
+void ProductModbus_RxIdleCallback(const uint8_t *data, uint16_t length);
 
 void ProductModbus_Init(void);
 void ProductModbus_Task(void);
 uint8_t ProductModbus_DebugMotor(int16_t rpm);
 uint8_t ProductModbus_DebugHeat(uint8_t channel, uint16_t level);
-void ProductModbus_RxByteISR(uint8_t value);
-void ProductModbus_RxBytesISR(const uint8_t *data, uint16_t length);
 void ProductModbus_ReportVersion(void);
 uint16_t ProductModbus_CRC16(const uint8_t *data, uint16_t length);
 

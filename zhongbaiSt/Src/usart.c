@@ -385,29 +385,34 @@ HAL_StatusTypeDef RS485_Transmit(const uint8_t *data, uint16_t length, uint32_t 
     }
   }
 
-  /* Suspend the interrupt reception before the transceiver drives the bus */
-#if defined(F1_PRODUCT_MODBUS)
-  (void)HAL_UART_AbortReceive(&huart2);
-#else
-  (void)HAL_UART_AbortReceive_IT(&huart2);
-#endif
+  /* Suspend the interrupt reception before the transceiver drives the bus.
+     * In the DMA path the USART2 interrupt is masked as well so a pending IDLE
+     * (or a bus echo) cannot fire RxEventCallback mid-frame and pollute the
+     * receive window while the transceiver is in transmit mode. */
+  #if defined(F1_PRODUCT_MODBUS)
+    HAL_NVIC_DisableIRQ(USART2_IRQn);
+    (void)HAL_UART_AbortReceive(&huart2);
+  #else
+    (void)HAL_UART_AbortReceive_IT(&huart2);
+  #endif
 
-  RS485_TX_ENABLE();
-  status = HAL_UART_Transmit(&huart2, (uint8_t *)data, length, timeout);
-  RS485_RX_ENABLE();
+    RS485_TX_ENABLE();
+    status = HAL_UART_Transmit(&huart2, (uint8_t *)data, length, timeout);
+    RS485_RX_ENABLE();
 
-  /* Drop anything the receiver latched while DE was high (bus echo) */
-  __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_FEF | UART_CLEAR_PEF);
-  __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);
+    /* Drop anything the receiver latched while DE was high (bus echo) */
+    __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_OREF | UART_CLEAR_NEF | UART_CLEAR_FEF | UART_CLEAR_PEF);
+    __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);
 
-  /* Re-arm the single-byte interrupt reception for the next request */
-#if defined(F1_PRODUCT_MODBUS)
-  (void)RS485_StartReceiveDMA();
-#else
-  (void)HAL_UART_Receive_IT(&huart2, &RecData, 1U);
-#endif
+    /* Re-arm the single-byte interrupt reception for the next request */
+  #if defined(F1_PRODUCT_MODBUS)
+    (void)RS485_StartReceiveDMA();
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
+  #else
+    (void)HAL_UART_Receive_IT(&huart2, &RecData, 1U);
+  #endif
 
-  return status;
+    return status;
 }
 
 HAL_StatusTypeDef RS485_StartReceiveDMA(void)
@@ -424,7 +429,17 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 #if defined(F1_PRODUCT_MODBUS)
   if (huart->Instance == USART2)
   {
-    ProductModbus_RxBytesISR(usart2DmaRx, size);
+    /* The HAL also invokes this callback on DMA half-transfer (size ==
+     * RxXferSize/2) while reception is still running (RxState == BUSY_RX).
+     * Copying at that point would append the first half twice — once here and
+     * again on the final IDLE/full-transfer event — corrupting the stream.
+     * Only handle events where reception has actually completed (IDLE or a
+     * full window transfer), mirroring the reference IDLE-only hand-off. */
+    if (huart->RxState != HAL_UART_STATE_READY)
+    {
+      return;
+    }
+    ProductModbus_RxIdleCallback(usart2DmaRx, size);
     (void)RS485_StartReceiveDMA();
   }
 #else
