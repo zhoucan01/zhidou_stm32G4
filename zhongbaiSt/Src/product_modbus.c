@@ -26,11 +26,23 @@
 #define MB_EX_ILLEGAL_ADDRESS 2U
 #define MB_EX_ILLEGAL_VALUE 3U
 
+/* A Modbus RTU frame arrives back-to-back within a few ms at the configured
+ * 1 Mbaud rate (256 bytes ~= 2.6 ms). If the stream head cannot form a
+ * complete frame within this time the accepted bytes are truncated/garbled
+ * (e.g. an FC15/FC16 byte-count field was corrupted). Drop the head byte
+ * instead of waiting forever, which would block every later request — the
+ * "occasionally no answer" symptom. */
+#define MODBUS_RX_HEAD_TIMEOUT_MS  20U
+
 uint8_t modbusRxWindow[MODBUS_RX_WINDOW_SIZE];
 volatile uint16_t modbusRxLength;
 volatile uint32_t modbusRxOverflowCount;
 volatile uint32_t modbusCrcErrorCount;
 volatile uint32_t modbusFrameErrorCount;
+
+/* Parser stall watchdog state (task context only). */
+static uint32_t modbusRxStallTick;
+static uint8_t  modbusRxStallArmed;
 
 static uint8_t coils[MB_COIL_COUNT];
 static uint16_t holdingRegs[MB_HOLD_REG_COUNT];
@@ -401,6 +413,11 @@ static void consumeRxBytes(uint16_t count)
   modbusRxLength = (uint16_t)(modbusRxLength - count);
   if(modbusRxLength != 0U) memmove(modbusRxWindow, &modbusRxWindow[count], modbusRxLength);
   if(primask == 0U) __enable_irq();
+
+  /* Any forward progress invalidates a previously armed stall deadline;
+   * otherwise a stale tick could drop a valid byte while several buffered
+   * frames are being processed back-to-back. */
+  modbusRxStallArmed = 0U;
 }
 
 static uint8_t runMotion(int16_t rpm, uint16_t rampMs, uint16_t acc,
@@ -692,12 +709,29 @@ void ProductModbus_Task(void)
   holdingRegs[58]=(uint16_t)Commissioning_VoltageLimitTicks;
   holdingRegs[59]=(uint16_t)(Commissioning_VoltageLimitTicks >> 16);
   updatePrivateSnapshot();
-  if(modbusRxLength == 0U) return;
+    if(modbusRxLength == 0U)
+        {
+          modbusRxStallArmed = 0U;
+          return;
+        }
 
-  while(1)
-  {
-    available = modbusRxLength;
-    /* ASCII is recognized only at the stream head; binary payloads are never
+        while(1)
+        {
+          available = modbusRxLength;
+
+          /* Watchdog: once the parser is waiting for more bytes it must not wait
+           * forever on a truncated/garbled head. This mirrors the AT32 reference,
+           * which parses complete IDLE-delimited bursts and therefore never blocks
+           * on a partial frame. */
+          if(modbusRxStallArmed != 0U && (HAL_GetTick() - modbusRxStallTick) > MODBUS_RX_HEAD_TIMEOUT_MS)
+          {
+            modbusFrameErrorCount++;
+            consumeRxBytes(1U);
+            if(modbusRxLength == 0U) return;
+            available = modbusRxLength;
+          }
+
+      /* ASCII is recognized only at the stream head; binary payloads are never
      * scanned for NB prefixes. Preserve split lines until CR/LF arrives. */
 #if !defined(USRDUG_UI_UART)
     if(available != 0U && (modbusRxWindow[0] == 'n' || modbusRxWindow[0] == 'N'))
@@ -724,8 +758,13 @@ void ProductModbus_Task(void)
     if(available != 0U && (modbusRxWindow[0] == '\r' || modbusRxWindow[0] == '\n'))
     { consumeRxBytes(1U); continue; }
 #endif
-    if(available < 2U) return;
-    address = modbusRxWindow[0];
+    if(available < 2U)
+        {
+              modbusRxStallTick = HAL_GetTick();
+              modbusRxStallArmed = 1U;
+          return;
+        }
+        address = modbusRxWindow[0];
     if((address != MODBUS_SLAVE_ADDRESS && address != 0U) || !supportedFunction(modbusRxWindow[1]))
     {
       modbusFrameErrorCount++; consumeRxBytes(1U); continue;
@@ -734,17 +773,23 @@ void ProductModbus_Task(void)
     if(frameLength == 0U)
     {
       if((modbusRxWindow[1] == 15U || modbusRxWindow[1] == 16U) && available < 7U)
-        return;
-      modbusFrameErrorCount++; consumeRxBytes(1U); continue;
-    }
+          {
+                  modbusRxStallTick = HAL_GetTick();
+                  modbusRxStallArmed = 1U;
+            return;
+          }
+          modbusFrameErrorCount++; consumeRxBytes(1U); continue;
+        }
     if(frameLength > MODBUS_RX_WINDOW_SIZE)
     {
       modbusFrameErrorCount++; consumeRxBytes(1U); continue;
     }
     if(available < frameLength)
     {
-      return;
-    }
+              modbusRxStallTick = HAL_GetTick();
+              modbusRxStallArmed = 1U;
+          return;
+        }
     crc = (uint16_t)(modbusRxWindow[frameLength - 2U] | ((uint16_t)modbusRxWindow[frameLength - 1U] << 8));
     if(crc != ProductModbus_CRC16(modbusRxWindow, (uint16_t)(frameLength - 2U)))
     {
