@@ -1,1 +1,6 @@
 .vscode/
+
+# Keil build outputs and local IDE state
+**/MDK-ARM/Objects/
+**/MDK-ARM/Listings/
+*.uvguix.*
