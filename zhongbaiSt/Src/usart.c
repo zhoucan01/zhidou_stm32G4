@@ -439,7 +439,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
     {
       return;
     }
-    ProductModbus_RxBytesISR(usart2DmaRx, size);
+    ProductModbus_RxIdleCallback(usart2DmaRx, size);
     (void)RS485_StartReceiveDMA();
   }
 #else
