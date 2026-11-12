@@ -1,0 +1,10 @@
+# Keil build output and assembly listings
+/bootloader/MDK-ARM/bootloader/
+/bootloader/MDK-ARM/*.lst
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+ota_logs/
